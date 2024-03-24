@@ -8,6 +8,7 @@
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <sys/socket.h>
+#include <sys/sysinfo.h>
 #include <arpa/inet.h>
 #include <stdbool.h>
 #include "ssd1306.h"
@@ -18,7 +19,7 @@
 #define MAX_CMD_LEN    (32)
 #define I2C_ID         (1)
 #define DFONT          (0) /* Default small font */
-
+#define LOADAVG        "/proc/loadavg"
 #define THERMAL_ZONE0  "/sys/devices/virtual/thermal/thermal_zone0/hwmon0/temp1_input" /* CPU thermal */
 #define THERMAL_ZONE1  "/sys/devices/virtual/thermal/thermal_zone1/hwmon1/temp1_input" /* DDR thermal */
 
@@ -36,9 +37,17 @@ struct tc_stat {
 };
 
 struct meminfo {
-    unsigned long total_mm;
-    unsigned long free_mm;
-    unsigned long available_mm;
+    unsigned long totalram;
+    unsigned long freeram;
+};
+
+struct loadavg {
+    float loadavg_1min;
+    float loadavg_5min;
+    float loadavg_15min;
+    unsigned int nr_runnable;
+    unsigned int nr_scheduling;
+    unsigned int pid_newly_task;
 };
 
 struct rz_stats {
@@ -47,6 +56,7 @@ struct rz_stats {
     float mem_usage;
     char ip[MAX_IP_LEN];
     struct meminfo mm;
+    struct loadavg load; /* /proc/loadavg */
     struct tc_stat tc; /* time consuming */
 };
 
@@ -118,19 +128,31 @@ static void do_get_cpu_usage(struct rz_stats *stats)
 
 static void do_get_mem_usage(struct rz_stats *stats)
 {
-    char cmd[MAX_CMD_LEN] = "cat /proc/meminfo | head -3";
+    struct sysinfo sinfo;
+
+    if (!sysinfo(&sinfo)) {
+        stats->mm.totalram = sinfo.totalram;
+        stats->mm.freeram = sinfo.freeram;
+    }
+
+    stats->mem_usage =
+        (float)(stats->mm.totalram - stats->mm.freeram) / stats->mm.totalram;
+}
+
+static void do_get_loadavg(struct rz_stats *stats)
+{
     FILE *fp = NULL;
 
-    fp = popen(cmd, "r");
-    fscanf(fp, "MemTotal:  %lu kB\n MemFree:  %lu kB\n MemAvailable: %lu kB\n",
-        &stats->mm.total_mm,
-        &stats->mm.free_mm,
-        &stats->mm.available_mm);
+    fp = fopen(LOADAVG, "r");
+    fscanf(fp, "%f %f %f %u/%u %u",
+        &stats->load.loadavg_1min,
+        &stats->load.loadavg_5min,
+        &stats->load.loadavg_15min,
+        &stats->load.nr_runnable,
+        &stats->load.nr_scheduling,
+        &stats->load.pid_newly_task);
 
-    pclose(fp);
-
-    stats->mem_usage = (float)(stats->mm.total_mm - stats->mm.available_mm) /
-        (float)stats->mm.total_mm;
+    fclose(fp);
 }
 
 int main(void)
@@ -164,15 +186,23 @@ int main(void)
 
     ret += ssd1306_oled_onoff(display);
 
-    memset(&rz_stat, 0, sizeof(struct rz_stats));
-
     while (1) {
+        // clear all data
+        memset(&rz_stat, 0, sizeof(struct rz_stats));
+
+        // get loadavg
+        memset(line, 0, sizeof(line));
+        ssd1306_oled_set_XY(0, 0);
+        snprintf(line, sizeof(line), "OLED PID: %u",
+                getpid());
+        ssd1306_oled_write_line(DFONT, line);
+
         // get local ip
         if (!IP_CHECKED) {
             memset(line, 0, sizeof(line));
             ssd1306_oled_set_XY(0, 1);
             do_get_ip(rz_stat.ip);
-            snprintf(line, sizeof(line), "IP: %s", rz_stat.ip);
+            snprintf(line, sizeof(line), "(IP): %s", rz_stat.ip);
             ssd1306_oled_write_line(DFONT, line);
             IP_CHECKED = true;
         }
@@ -189,7 +219,7 @@ int main(void)
         memset(line, 0, sizeof(line));
         ssd1306_oled_set_XY(0, 3);
         do_get_cpu_usage(&rz_stat);
-        snprintf(line, sizeof(line), "CPU USR: %lu USR_HZ",
+        snprintf(line, sizeof(line), "CPU USR: %lu",
                 rz_stat.tc.usr);
         ssd1306_oled_write_line(DFONT, line);
 
@@ -197,7 +227,7 @@ int main(void)
         memset(line, 0, sizeof(line));
         ssd1306_oled_set_XY(0, 4);
         do_get_cpu_usage(&rz_stat);
-        snprintf(line, sizeof(line), "CPU SYS: %lu USR_HZ",
+        snprintf(line, sizeof(line), "CPU SYS: %lu",
                 rz_stat.tc.sys);
         ssd1306_oled_write_line(DFONT, line);
 
@@ -205,7 +235,7 @@ int main(void)
         memset(line, 0, sizeof(line));
         ssd1306_oled_set_XY(0, 5);
         do_get_cpu_usage(&rz_stat);
-        snprintf(line, sizeof(line), "CPU IRQ: %lu USR_HZ",
+        snprintf(line, sizeof(line), "CPU IRQ: %lu",
                 rz_stat.tc.irq);
         ssd1306_oled_write_line(DFONT, line);
 
@@ -216,6 +246,16 @@ int main(void)
         snprintf(line, sizeof(line), "MEM USAGE: %.4f",
                 rz_stat.mem_usage);
         ssd1306_oled_write_line(DFONT, line);
+
+        // get loadavg
+        memset(line, 0, sizeof(line));
+        ssd1306_oled_set_XY(0, 7);
+        do_get_loadavg(&rz_stat);
+        snprintf(line, sizeof(line), "R: %u SE: %u",
+                rz_stat.load.nr_runnable,
+                rz_stat.load.nr_scheduling);
+        ssd1306_oled_write_line(DFONT, line);
+
         sleep(1);
     }
 
